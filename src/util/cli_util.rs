@@ -35,9 +35,9 @@ fn build_recursive_hashmap(directory: &String, dir_relative_name: &String, tab: 
         relative_name.push('/');
         relative_name.push_str(&name);
         tab.insert(hash(&name), name.clone());
-        let hash = hash(&relative_name);
-        tab.insert(hash, relative_name);
         if t.is_file() {
+            let hash = hash(&relative_name);
+            tab.insert(hash, relative_name);
             if name.ends_with(".qml") {
                 println!("Hashing {}", file.path().to_str().unwrap());
                 let tree = tokenize_qml(

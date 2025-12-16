@@ -7,7 +7,7 @@ use crate::parser::common::IteratorPipeline;
 use crate::parser::diff::lexer::Keyword;
 use crate::parser::diff::parser::{
     FileChangeAction, Insertable, LocateRebuildActionSelector, Location, LocationSelector,
-    ObjectToChange, RebuildAction, RebuildInstruction, RemoveRebuildAction,
+    NodeSelectorObjectType, ObjectToChange, RebuildAction, RebuildInstruction, RemoveRebuildAction,
     ReplaceRebuildActionWhat,
 };
 use crate::parser::diff::parser::{NodeSelector, NodeTree, PropRequirement};
@@ -85,13 +85,18 @@ pub fn find_and_process(
     }
 }
 
-fn does_match(
+fn does_match_non_wildcard(
     object: &TranslatedObject,
     sel: &NodeSelector,
     object_named: Option<&String>,
 ) -> bool {
-    if sel.object_name != object.name {
-        return false;
+    match &sel.object {
+        NodeSelectorObjectType::Wildcard => return false,
+        NodeSelectorObjectType::Type(sel_name) => {
+            if sel_name != &object.name {
+                return false;
+            }
+        }
     }
     if sel.named.is_some() && object_named != sel.named.as_ref() {
         return false;
@@ -178,27 +183,60 @@ fn locate_in_tree(
                     if let Some((name, object)) = child_object {
                         match &object {
                             TreeRoot::Object(obj) => {
-                                if does_match(&obj.borrow(), sel, name) {
-                                    // Collect the matched child object
-                                    if force_raw_children && is_last {
-                                        swap_root.push(TreeRoot::Child {
-                                            parent: r.clone(),
-                                            child_index: i,
-                                        });
-                                    } else {
-                                        swap_root.push(object);
+                                macro_rules! add_to_new_root {
+                                    ($obj: expr) => {
+                                        // Collect the matched child object
+                                        if force_raw_children && is_last {
+                                            swap_root.push(TreeRoot::Child {
+                                                parent: r.clone(),
+                                                child_index: i,
+                                            });
+                                        } else {
+                                            swap_root.push($obj);
+                                        }
+                                    };
+                                }
+                                if let NodeSelectorObjectType::Wildcard = &sel.object {
+                                    // Since we're matching against the wildcard, there are two outcomes possible
+                                    // A - this object matches directly - it meets the wildcard's requirements, then add it to the list of
+                                    // new possible roots
+                                    // B - this object doesn't match - in that case descend further and try to
+
+                                    let mut selector_objtype_patching = sel.clone();
+                                    selector_objtype_patching.object =
+                                        NodeSelectorObjectType::Type(obj.borrow().name.clone());
+                                    // Check for case A
+                                    if does_match_non_wildcard(
+                                        &obj.borrow(),
+                                        &selector_objtype_patching,
+                                        name,
+                                    ) {
+                                        add_to_new_root!(object.clone());
                                     }
+
+                                    // Now check for case B - descend recursively
+                                    let recur_roots = vec![TreeRoot::Object(obj.clone())];
+                                    let selectors = vec![sel.clone()];
+                                    swap_root.extend_from_slice(&locate_in_tree(
+                                        recur_roots,
+                                        &selectors,
+                                        force_raw_children,
+                                    ));
+                                } else if does_match_non_wildcard(&obj.borrow(), sel, name) {
+                                    add_to_new_root!(object);
                                 }
                             }
                             TreeRoot::Enum(r#enum) => {
-                                if sel.is_simple() && sel.object_name == r#enum.name {
-                                    if force_raw_children && is_last {
-                                        swap_root.push(TreeRoot::Child {
-                                            parent: r.clone(),
-                                            child_index: i,
-                                        });
-                                    } else {
-                                        swap_root.push(object);
+                                if let NodeSelectorObjectType::Type(sel_name) = &sel.object {
+                                    if sel_name == &r#enum.name && sel.is_simple() {
+                                        if force_raw_children && is_last {
+                                            swap_root.push(TreeRoot::Child {
+                                                parent: r.clone(),
+                                                child_index: i,
+                                            });
+                                        } else {
+                                            swap_root.push(object);
+                                        }
                                     }
                                 }
                             }
@@ -207,8 +245,10 @@ fn locate_in_tree(
                                 child_index: _,
                             } => {
                                 if let Some(name) = name {
-                                    if sel.is_simple() && sel.object_name == *name {
-                                        swap_root.push(object);
+                                    if let NodeSelectorObjectType::Type(sel_name) = &sel.object {
+                                        if sel_name == name && sel.is_simple() {
+                                            swap_root.push(object);
+                                        }
                                     }
                                 }
                             }
@@ -267,7 +307,7 @@ fn find_first_matching_child(root: &TreeRoot, tree: &Vec<NodeSelector>) -> Resul
                     let selector = &tree[0];
                     if selector.is_simple() {
                         // Might be a generic prop.
-                        if child.get_name() == Some(&selector.object_name) {
+                        if child.get_name() == Some(selector.object.unwrap_identifier()) {
                             return Ok(i);
                         }
                     }
@@ -302,7 +342,7 @@ fn find_first_matching_child(root: &TreeRoot, tree: &Vec<NodeSelector>) -> Resul
         }
         TreeRoot::Enum(r#enum) if tree.len() == 1 && tree[0].is_simple() => {
             for (i, value) in r#enum.values.borrow().iter().enumerate() {
-                if value.0 == tree[0].object_name {
+                if value.0 == *tree[0].object.unwrap_identifier() {
                     return Ok(i);
                 }
             }
@@ -1099,7 +1139,7 @@ fn process(absolute_root: &mut TranslatedTree, diff: &Change, slots: &mut Slots)
                                 for child_object in &e.borrow().children {
                                     // Yes, and it matches
                                     if child_object.get_name()
-                                        == Some(&tree_selector[0].object_name)
+                                        == Some(&tree_selector[0].object.unwrap_identifier())
                                     {
                                         return true;
                                     }
@@ -1107,7 +1147,7 @@ fn process(absolute_root: &mut TranslatedTree, diff: &Change, slots: &mut Slots)
                             }
                             TreeRoot::Enum(e) => {
                                 for value in e.values.borrow().iter() {
-                                    if value.0 == tree_selector[0].object_name {
+                                    if value.0 == *tree_selector[0].object.unwrap_identifier() {
                                         return true;
                                     }
                                 }
@@ -1219,7 +1259,7 @@ fn process(absolute_root: &mut TranslatedTree, diff: &Change, slots: &mut Slots)
                         obj.borrow_mut().children.retain(|e| {
                             if selector.is_simple() {
                                 // Might be a generic prop.
-                                if e.get_name() == Some(&selector.object_name) {
+                                if e.get_name() == Some(&selector.object.unwrap_identifier()) {
                                     return false;
                                 }
                             }
@@ -1227,10 +1267,14 @@ fn process(absolute_root: &mut TranslatedTree, diff: &Change, slots: &mut Slots)
                             // Complex object. Delve deeper.
                             match e {
                                 TranslatedObjectChild::Object(e) => {
-                                    !does_match(&e.borrow(), selector, None)
+                                    !does_match_non_wildcard(&e.borrow(), selector, None)
                                 }
                                 TranslatedObjectChild::ObjectAssignment(e) => {
-                                    !does_match(&e.value.borrow(), selector, Some(&e.name))
+                                    !does_match_non_wildcard(
+                                        &e.value.borrow(),
+                                        selector,
+                                        Some(&e.name),
+                                    )
                                 }
                                 _ => true, // Retain all else!
                             }
@@ -1243,7 +1287,7 @@ fn process(absolute_root: &mut TranslatedTree, diff: &Change, slots: &mut Slots)
                         r#enum
                             .values
                             .borrow_mut()
-                            .retain(|e| e.0 != selector.object_name);
+                            .retain(|e| e.0 != *selector.object.unwrap_identifier());
                     }
                     TreeRoot::Child {
                         parent: _,

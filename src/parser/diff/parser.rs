@@ -37,15 +37,39 @@ pub enum PropRequirement {
 }
 
 #[derive(Debug, Clone)]
+pub enum NodeSelectorObjectType {
+    Type(String),
+    Wildcard,
+}
+
+impl NodeSelectorObjectType {
+    pub fn unwrap_identifier(&self) -> &String {
+        match self {
+            Self::Type(t) => t,
+            _ => panic!(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct NodeSelector {
-    pub object_name: String,
+    pub object: NodeSelectorObjectType,
     pub named: Option<String>,
     pub props: HashMap<String, PropRequirement>,
 }
 
+impl std::fmt::Display for NodeSelectorObjectType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wildcard => write!(f, "?"),
+            Self::Type(str) => write!(f, "{str}"),
+        }
+    }
+}
+
 impl std::fmt::Display for NodeSelector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.object_name)?;
+        write!(f, "{}", self.object)?;
         if let Some(name) = &self.named {
             write!(f, ":{}", name)?;
         }
@@ -72,16 +96,18 @@ impl std::fmt::Display for NodeSelector {
 }
 
 impl NodeSelector {
-    pub fn new(name: String) -> Self {
+    pub fn new(object: NodeSelectorObjectType) -> Self {
         Self {
-            object_name: name,
+            object,
             named: None,
             props: HashMap::new(),
         }
     }
 
     pub fn is_simple(&self) -> bool {
-        self.props.is_empty() && self.named.is_none()
+        self.props.is_empty()
+            && self.named.is_none()
+            && matches!(self.object, NodeSelectorObjectType::Type(_))
     }
 }
 
@@ -291,8 +317,13 @@ impl<'a> Parser<'a> {
         //                         /------------------------------\ /----------------------------------------------------\
         // ObjectName : named # id = property_name = property_value = property name ~ "property value contains this value"
         // [...] can be used for grouping.
-        let name = self.next_id()?;
-        let mut object = NodeSelector::new(name);
+        let lex = self.next_lex()?;
+        let obj_type = match lex {
+            TokenType::Symbol('?') => NodeSelectorObjectType::Wildcard,
+            TokenType::Identifier(id) => NodeSelectorObjectType::Type(id),
+            other => return error_received_expected!(other, "object type name or wildcard ?"),
+        };
+        let mut sel = NodeSelector::new(obj_type);
         while let Some(TokenType::Symbol(symbol)) = self.stream.peek() {
             match symbol {
                 '[' | ']' => {
@@ -301,18 +332,15 @@ impl<'a> Parser<'a> {
                 } // Meaningless
                 '!' => {
                     self.stream.next();
-                    object
-                        .props
-                        .insert(self.next_id()?, PropRequirement::Exists);
+                    sel.props.insert(self.next_id()?, PropRequirement::Exists);
                 }
                 ':' => {
                     self.stream.next();
-                    object.named = Some(self.next_id()?);
+                    sel.named = Some(self.next_id()?);
                 }
                 '#' => {
                     self.stream.next();
-                    object
-                        .props
+                    sel.props
                         .insert("id".to_string(), PropRequirement::Equals(self.next_id()?));
                 }
                 '.' => {
@@ -324,16 +352,14 @@ impl<'a> Parser<'a> {
                     match next {
                         TokenType::Symbol('~') => {
                             // Then string / identifier
-                            // let next = self.next_lex()?;
                             let string_value = self.next_string_or_id()?;
-                            object
-                                .props
+                            sel.props
                                 .insert(prop_name, PropRequirement::Contains(string_value));
                         }
                         TokenType::Symbol('=') => {
                             // Then ID
                             let id = self.next_string_or_id()?;
-                            object.props.insert(prop_name, PropRequirement::Equals(id));
+                            sel.props.insert(prop_name, PropRequirement::Equals(id));
                         }
                         _ => return error_received_expected!(next, "Property value condition"),
                     }
@@ -343,7 +369,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(object)
+        if sel.props.is_empty() && matches!(sel.object, NodeSelectorObjectType::Wildcard) {
+            bail!("Cannot create wildcard selectors without any specifiers");
+        }
+
+        Ok(sel)
     }
 
     pub fn read_tree(&mut self) -> Result<NodeTree> {
@@ -956,7 +986,7 @@ impl<'a> Parser<'a> {
                             output.push(Change {
                                 source: self.source_name.clone(),
                                 changes: vec![FileChangeAction::Rebuild(RebuildAction {
-                                    selector: NodeSelector { object_name: "root".to_string(), named: None, props: Default::default() },
+                                    selector: NodeSelector { object: NodeSelectorObjectType::Type("root".to_string()), named: None, props: Default::default() },
                                     redefine: false,
                                     actions: self.read_rebuild_instructions(false)?,
                                 })],

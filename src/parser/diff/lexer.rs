@@ -1,6 +1,6 @@
 use std::{fmt::Display, mem::take};
 
-use anyhow::{Error, bail};
+use anyhow::{bail, Error};
 
 use crate::parser::{
     common::{CollectionType, StringCharacterTokenizer},
@@ -281,8 +281,8 @@ impl Lexer {
                 }
 
                 //       Child-of    Prop.EQ        ID      p.named | Others
-                // Prop.v      Contains    Traversal     Name       |
-                '[' | ']' | '>' | '~' | '=' | '/' | '#' | ':' | '!' | '.' => {
+                // Prop.v      Contains    Traversal     Name       |      Wildcard
+                '[' | ']' | '>' | '~' | '=' | '/' | '#' | ':' | '!' | '.' | '?' => {
                     let symbol = self.stream.advance().unwrap();
                     Ok(TokenType::Symbol(symbol))
                 }

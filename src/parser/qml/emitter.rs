@@ -235,6 +235,7 @@ fn _emit_object_to_token_stream(object: &Object, stream: &mut Vec<TokenType>, on
             }
             ObjectChild::Component(comp) => {
                 add!(TokenType::Keyword(Keyword::Component));
+                add!(TokenType::Identifier(comp.name.clone()));
                 add!(TokenType::Symbol(':'));
                 _emit_object_to_token_stream(&comp.object, stream, false);
             }
